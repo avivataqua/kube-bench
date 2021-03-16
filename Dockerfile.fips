@@ -1,0 +1,94 @@
+FROM goboring/golang:1.15.9b5 as build
+WORKDIR /go/src/github.com/aquasecurity/kube-bench/
+COPY go.mod go.sum ./
+COPY main.go .
+COPY check/ check/
+COPY cmd/ cmd/
+COPY internal/ internal/
+ARG KUBEBENCH_VERSION
+ARG GOOS=linux
+ARG GOARCH=amd64
+RUN GO111MODULE=on CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -tags fipsonly -a -ldflags "-X github.com/aquasecurity/kube-bench/cmd.KubeBenchVersion=${KUBEBENCH_VERSION} -w" -o /go/bin/kube-bench
+
+FROM alpine:3.12 AS build-openssl
+
+ARG OPENSSL_FIPS_VER=2.0.16
+ARG OPENSSL_VER=1.0.2u
+ARG OPENSSL_FIPS_PGP_FINGERPRINT=D3577507FA40E9E2
+ARG OPENSSL_FIPS_HMACSHA1=e8dbfa6cb9e22a049ec625ffb7ccaf33e6116598
+ARG OPENSSL_FIPS_HASH=a3cd13d0521d22dd939063d3b4a0d4ce24494374b91408a05bdaca8b681c63d4
+ARG OPENSSL_PGP_FINGERPRINT=D9C4D26D0E604491
+ARG OPENSSL_HASH=ecd0c6ffb493dd06707d38b14bb4d8c2288bb7033735606569d8f90f89669d16
+WORKDIR /build
+
+#Use your FIPS-validated tools to validate the FIPS Module archive and add to it to the image
+# otherwie it will be downloaded and validated by a non-FIPS 140-2, vanilla OpenSSL
+# ADD openssl-fips-${OPENSSL_FIPS_VER}.tar.gz ./build
+RUN test -f openssl-fips-${OPENSSL_FIPS_VER}.tar.gz || wget --quiet https://www.openssl.org/source/openssl-fips-$OPENSSL_FIPS_VER.tar.gz
+
+RUN apk update \
+    && apk upgrade \
+    && apk add --update wget gcc gzip tar libc-dev ca-certificates perl make coreutils gnupg linux-headers zlib-dev openssl \
+    && openssl sha1 -hmac etaonrishdlcupfm openssl-fips-$OPENSSL_FIPS_VER.tar.gz | grep $OPENSSL_FIPS_HMACSHA1 \
+    && apk del openssl
+RUN wget --quiet https://www.openssl.org/source/openssl-fips-$OPENSSL_FIPS_VER.tar.gz.asc \
+    && gpg --keyserver hkp://keyserver.ubuntu.com --recv $OPENSSL_FIPS_PGP_FINGERPRINT \
+    && gpg --verify openssl-fips-$OPENSSL_FIPS_VER.tar.gz.asc openssl-fips-$OPENSSL_FIPS_VER.tar.gz
+RUN echo "$OPENSSL_FIPS_HASH openssl-fips-$OPENSSL_FIPS_VER.tar.gz" | sha256sum -c - | grep OK
+RUN tar -xzf openssl-fips-$OPENSSL_FIPS_VER.tar.gz \
+    && cd openssl-fips-$OPENSSL_FIPS_VER \
+    && ./config \
+    && make \
+    && make install
+RUN wget --quiet https://www.openssl.org/source/openssl-$OPENSSL_VER.tar.gz \
+    && wget --quiet https://www.openssl.org/source/openssl-$OPENSSL_VER.tar.gz.asc \
+    && gpg --keyserver hkp://keyserver.ubuntu.com --recv $OPENSSL_PGP_FINGERPRINT \
+    && gpg --verify openssl-$OPENSSL_VER.tar.gz.asc \
+    && echo "$OPENSSL_HASH openssl-$OPENSSL_VER.tar.gz" | sha256sum -c - | grep OK
+RUN tar -xzf openssl-$OPENSSL_VER.tar.gz \
+    && cd openssl-$OPENSSL_VER \
+    && perl ./Configure linux-x86_64 --prefix=/usr \
+                                     --libdir=lib \
+                                     --openssldir=/etc/ssl \
+                                     fips shared zlib enable-montasm enable-md2 enable-ec_nistp_64_gcc_128 \
+                                     -DOPENSSL_NO_BUF_FREELISTS \
+                                     -Wa,--noexecstack \
+    && make \
+    && make install_sw
+
+COPY test_fips.c /build/test_fips.c
+RUN gcc test_fips.c -lssl -lcrypto -otest_fips \
+    && chmod +x test_fips \
+    && ./test_fips
+
+FROM alpine:3.12 AS run
+WORKDIR /opt/kube-bench/
+# add GNU ps for -C, -o cmd, and --no-headers support
+# https://github.com/aquasecurity/kube-bench/issues/109
+RUN apk --no-cache add procps
+
+# Openssl is used by OpenShift tests
+# https://github.com/aquasecurity/kube-bench/issues/535
+COPY --from=build-openssl /usr/lib/libssl.so.* /usr/lib/
+COPY --from=build-openssl /usr/lib/libcrypto.so.* /usr/lib/
+COPY --from=build-openssl /usr/lib/engines/ /usr/lib/
+COPY --from=build-openssl /usr/bin/openssl /usr/bin/
+
+ENV PATH=$PATH:/usr/local/mount-from-host/bin
+
+COPY --from=build /go/bin/kube-bench /usr/local/bin/kube-bench
+COPY entrypoint.sh .
+COPY cfg/ cfg/
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["install"]
+
+# Build-time metadata as defined at http://label-schema.org
+ARG BUILD_DATE
+ARG VCS_REF
+LABEL org.label-schema.build-date=$BUILD_DATE \
+    org.label-schema.name="kube-bench" \
+    org.label-schema.description="Run the CIS Kubernetes Benchmark tests" \
+    org.label-schema.url="https://github.com/aquasecurity/kube-bench" \
+    org.label-schema.vcs-ref=$VCS_REF \
+    org.label-schema.vcs-url="https://github.com/aquasecurity/kube-bench" \
+    org.label-schema.schema-version="1.0"

@@ -55,6 +55,8 @@ build-docker:
 			 --build-arg KUBEBENCH_VERSION=$(KUBEBENCH_VERSION) \
              -t $(IMAGE_NAME) .
 
+# builds the current dev docker version
+
 # unit tests
 tests:
 	GO111MODULE=on go test -vet all -short -race -timeout 30s -coverprofile=coverage.txt -covermode=atomic ./...
@@ -62,6 +64,19 @@ tests:
 # integration tests using kind
 integration-tests: build-docker
 	GO111MODULE=on go test ./integration/... -v -tags integration -timeout 1200s -args -kubebenchImg=$(IMAGE_NAME)
+
+#
+build-docker-fips:
+	docker build --build-arg BUILD_DATE=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ") \
+             --build-arg VCS_REF=$(VERSION) \
+			 --build-arg KUBEBENCH_VERSION=$(KUBEBENCH_VERSION) \
+             -t $(IMAGE_NAME)-fips \
+             -f Dockerfile.fips \
+             .
+
+# integration tests using kind
+integration-tests-fips: build-docker-fips
+	GO111MODULE=on go test ./integration/... -v -tags integration -timeout 1200s -args -kubebenchImg=$(IMAGE_NAME)-fips
 
 # creates a kind cluster to be used for development.
 HAS_KIND := $(shell command -v kind;)

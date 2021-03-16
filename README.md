@@ -338,6 +338,12 @@ go build -o kube-bench .
 ./kube-bench
 ```
 
+### Building an image with FIPS capable libraries
+The ``Dockerfile.fips`` builds the kube-bench conatainer image using [boring go](https://github.com/golang/go/blob/dev.boringcrypto/README.boringcrypto.md) and
+OpenSSL 1.0.2u compiled with the OpenSSL FIPS Object Module 2.0 enabled. Note that WHILE the
+OpenSSL FIPS OM 2.0 while still validated, its validation status is 'historical'. \
+Also note that FIPS [Security Policy](https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp2398.pdf) requires "An independently acquired FIPS 140-2 validated implementation of SHA1 HMAC must be used for this digest verification." The SHA1 HMAC in this image is validated by a non-FIPS 140-2, vanilla OpenSSL installation.
+
 ## Output
 
 There are four output states:
